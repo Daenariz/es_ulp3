@@ -49,7 +49,6 @@
 
 #define NUM_NEIGHBOURS 2
 #define STORAGE_SIZE 6
-#define RGB_DATA_LEN (LED_COUNT * 24)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -72,11 +71,9 @@ uint8_t partnerId;
 uint8_t packageId;
 uint8_t storage[6] = {0};
 uint8_t tempStorage[6] = {0};
-uint8_t ApNr;
-uint8_t neighbourIDs[] = { 38 };
+uint8_t neighbourIDs[] = { 36, 38 };
 
 // Kontrollfluesse
-bool receive = false;
 bool passOn = false;
 bool create = false;
 bool deliver = false;
@@ -86,26 +83,17 @@ bool finishedSend = false;
 bool finishedStore = false;
 bool failure = false;
 bool receivedSDU = false;
-bool GPIO_neighbour_in = false;
 bool pushedButton = false;
-// Speicher
-//uint32_t L7_SDU
-/*uint8_t state;
-uint8_t storage;
-uint32_t pkgID;
-uint32_t partnerID;
-*/
-// Kontrollfluesse
-bool spaceAvailable = true;
-bool pkgAvailable = false;
-bool partnerIDValid = false;
+bool failureChecked = false;
+
+
 
 // Aktionentyp + Aktionsvariable
-typedef enum { Z_processing, Z_awaiting, Z_received, Z_sent, Z_failure, Z_idle, } zustand_t;
+typedef enum { Z_processing, Z_awaiting, Z_received, Z_sent, Z_failure } zustand_t;
 zustand_t zustand;
 
 // Aktionentyp + Aktionsvariable
-typedef enum { A_send, A_status, A_store, A_message, A_updateStorage} aktion_t;
+typedef enum { A_checkFailure, A_handleSend, A_deployPackage, A_finalize, A_failure } aktion_t;
 aktion_t aktion;
 
 /* USER CODE END PV */
@@ -190,7 +178,7 @@ int main(void)
 		L1_receive(L1_PDU);
 	  }
 	  std();
-	  //pat();
+	  pat(); //
   }
   /* USER CODE END 3 */
 }
@@ -395,53 +383,68 @@ void resetData(){
 	packageId = 0;
 	partnerId = 0;
 	errorId = 0;
-	receive = false;
 	passOn = false;
 	create = false;
 	deliver = false;
 	poll = false;
 	await = false;
-	ApNr = 0;
 	failure = false;
 	finishedStore = false;
 	finishedSend = false;
 	receivedSDU = false;
-	GPIO_neighbour_in = false;
 	pushedButton = false;
+	failureChecked = false;
 }
+
 // STD
 void std(void){
 	switch(zustand){
 	case Z_processing:
-		if (receivedSDU){
-			checkFailure();
-			//updateStorage();   /// ?
-			receivedSDU = false;
+		//if (receivedSDU){
+////			checkFailure();
+////			receivedSDU = false;
+//			aktion = A_checkFailure;
+//			zustand = Z_processing;
+//		}
+//		else if(poll || (!receivedSDU)){
+//			poll = false;
+//		}
+			if (receivedSDU && !failureChecked) {
+			            // Failure-Check ausführen
+			            aktion = A_checkFailure;
+			            //failureChecked = true; // Markiere den Failure-Check als abgeschlossen
+			        }
+			        else if (receivedSDU && failureChecked) {
+			            // Nach dem Failure-Check zurück in Z_processing
+			            receivedSDU = false;  // Reset der SDU
+			            //failureChecked = false; // Reset für zukünftige SDUs
+			        }
+			        else if (poll || !receivedSDU) {
+			            poll = false;
+			        }
+			//break;
+		if (create && (!failure)){
+//			deployPackage(); //			poll = false;
+			aktion = A_deployPackage;
+			zustand = Z_awaiting;
 		}
-		else if(poll || (!receivedSDU)){
-			poll = false;
-		}
-		if (create && (!failure)){ // no poll (transient state), because processing + packageId should only be reported in modes passOn and deliver
-			deployPackage();
+		else if (await && (!failure)){
 			zustand = Z_awaiting;
 			poll = false;
 		}
-		else if (await && (!failure)){ // no poll (transient state), because processing + packageId should only be reported in modes passOn and deliver
-			deployPackage();
-			zustand = Z_awaiting;
-			poll = false;
+		else if (poll && deliver && (!finishedSend) && (!failure)){
+//			handleSend();//			poll = false;
+			aktion = A_handleSend;
+			zustand = Z_processing;
 		}
-		else if (deliver && (!failure)){ /// ?
-			handleSend();
-			updateStorage();
+		else if (poll && deliver && finishedSend && (!failure)){
 			zustand = Z_sent;
 			poll = false;
-		}
-		else if (passOn && pushedButton && (!failure)){
-			handleSend();
-			updateStorage();
+				}
+		else if (poll && passOn && pushedButton && (!failure)){
+//			handleSend();//			poll = false;
+			aktion = A_handleSend;
 			zustand = Z_sent;
-			poll = false;
 		}
 		else if (failure){
 			zustand = Z_failure;
@@ -450,18 +453,16 @@ void std(void){
 		break;
 
 	case Z_awaiting:
-//		if (poll && await && pushedButton){
-//			//aktion = A_store;
-//			zustand = Z_received;
-//		}
-		//else
-			if (poll && finishedStore && pushedButton && await){
-			zustand = Z_received;
-			poll = false; //*
+		if (poll && await && passOn && pushedButton){
+			zustand = Z_processing;
 		}
-		else if (poll && finishedStore && create){ //else if (poll && finishedStore && create && count	){
-			//updateStorage();
-			deployPackage();
+		//else
+		if (/*poll && finishedStore &&*/ pushedButton && await){
+//			deployPackage();//			poll = false; //*
+			aktion = A_deployPackage;
+			zustand = Z_received;
+		}
+		else if (poll && finishedStore && create){
 			zustand = Z_received;
 			poll = false; //*
 		}
@@ -469,88 +470,63 @@ void std(void){
 
 	case Z_received:
 		if (poll){
-			updateStorage();
-			resetData();
+//			updateStorage();//			resetData();
+			aktion = A_finalize;
 			zustand = Z_processing;
-			poll = false;
 		}
 		break;
 
 	case Z_sent:
-		if (poll){
-			resetData();
+		if (poll && finishedSend){
+//			updateStorage();//			resetData();
+			aktion = A_finalize;
 			zustand = Z_processing;
-			poll = false;
 		}
 		break;
 
 	case Z_failure:
 		if(poll){
-			resetData();
+//			resetData();//			poll = false;
+			aktion = A_failure;
 			zustand = Z_processing;
-			poll = false;
 		}
 		break;
 
 	}
 }
 
-//* Kontrollflüsse werden im Interrupt gesetzt und müssen deshalb hier zurückgesetzt werden
 
-// PAT
-//void pat(void){
-//	switch(aktion){
-//	case A_send:
-//		resetData();
-//		stateProcessing();
-//		break;
-//	case A_status:
-//		stateProcessing();
-//		//handleSend();
-//		break;
-//	case A_store:
-//		stateProcessing();
-//		//handleSend();
-//		break;
-//	case A_message:
-//		stateFailure();
-//		break;
-//	case A_updateStorage:
-//		//updatestorage();
-//		stateSent();
-//		break;
-//	}
-//}
-
-// DFD processes //
-
-void sendPulse(void) {
-	uint8_t partnerNumber = 0;
-//		// find out number of partner
-//		for(int i = 0; i < NUM_NEIGHBOURS; i++){
-//			if(neighbourIDs[i] == partnerId){
-//				partnerNumber = i;
-//				break;
-//			}
-//		}
-		// toggle corresponding pin for 1ms
-		HAL_GPIO_WritePin (GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-		HAL_Delay(1000);
-		HAL_GPIO_WritePin (GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-		HAL_Delay(1000);
+//PAT
+void pat(void){
+	switch(aktion){
+	case A_checkFailure:
+		//resetData();
+		checkFailure();
+		receivedSDU = false;
+		break;
+	case A_deployPackage:
+		deployPackage();
+		setPollFlagFalse();
+		break;
+	case A_handleSend:
+		handleSend();
+		setPollFlagFalse();
+		break;
+	case A_finalize:
+		updateStorage();
+		resetData();
+		break;
+	case A_failure:
+		resetData();
+		setPollFlagFalse();
+		break;
+	}
 }
 
-void parseRxBuff(void) {
-
+void setPollFlagFalse(void){
+	poll = false;
 }
 
-void parseSDU(void) {
-
-}
-
-void status(void) {
-
-}
 
 void deployPackage(void) {
 		// copy storage to tempStorage
@@ -584,15 +560,19 @@ void handleSend(void) {
 
 void checkFailure(void){
 	bool storageFull = false;
-	bool PackageInStorage = false;
-	bool PackageNoExist = false;
+	bool packageInStorage = false;
+	bool packageNoExist = false;
 	bool unknownNeighbour = true;
 	bool unknownPackage = false;
 
 	int i;
 
+	// check if package has a valid number
+	if((packageId < 0) || (packageId > 16)){
+		unknownPackage = true;
+	}
 	// check if neighbour is known
-	if(partnerId == 0){ //TODO: fixed with idle in processing, but that should not be there
+	if(partnerId == 0){
 		unknownNeighbour = false; // neighbourId is valid
 	}
 	for(i = 0; i < NUM_NEIGHBOURS; i++){
@@ -603,42 +583,40 @@ void checkFailure(void){
 	}
 	if((create || await) == true){ // create or await is set
 		// check if storage is already completely filled
+		//storageFull = false;
 		for(i = 0; i < STORAGE_SIZE; i++){
 			if(storage[i] == 0){
 				storageFull = false; // storage is not completely filled
+				//break;
 			}
-			else {
+			else{
 				storageFull = true;
 			}
 		}
-		PackageNoExist = false;
-		// check if packageId is already stored in storage
+		//packageNoExist = false;
+		// check if packageId is already stored in Lager
 		for(i = 0; i < STORAGE_SIZE; i++){
 			if(storage[i] == packageId){
-				PackageInStorage = true; // packageId already exists in storage
+				packageInStorage = true; // packageId already exists in Lager
 				break;
 			}
 		}
+
 	}
 
 	if((passOn || deliver) == true){ // deliver or passOn is set
-		storageFull = false;
+		//storageFull = false;
 
 		// Check if packageId exists in storage
 		for(i = 0; i < STORAGE_SIZE; i++){
 			if(storage[i] == packageId){
-				PackageNoExist = false; // packageId does exist in storage
+				packageNoExist = false; // packageId does exist in storage
 			}
 		}
 	}
 
-	// check if package has a valid number
-	if((packageId < 0) || (packageId > 16)){
-		unknownPackage = true;
-	}
-
 	// set errorId according to failure
-	if(PackageInStorage){
+	if(packageInStorage){
 		failure = true;
 		errorId = 1;
 	}
@@ -646,7 +624,7 @@ void checkFailure(void){
 		failure = true;
 		errorId = 2;
 	}
-	else if(PackageNoExist){
+	else if(packageNoExist){
 		failure = true;
 		errorId = 3;
 	}
@@ -658,15 +636,7 @@ void checkFailure(void){
 		failure = true;
 		errorId = 5;
 	}
-}
-
-
-void msg(void) {
-
-}
-
-void validatePartner() {
-
+	failureChecked = true;
 }
 
 void updateStorage(void) {
@@ -723,70 +693,59 @@ void L3_receive(uint8_t L3_PDU[L3_PDU_size]){
 
 void L7_receive(uint8_t L7_PDU[L7_PDU_size]){
 	 uint8_t apNr = L7_PDU[0];
-
 	 memcpy(L7_SDU, &L7_PDU[1], L7_SDU_size);
 	 switch (apNr) {
 	    case 42: // Await/ Create Package
 		    packageId = L7_SDU[0];
 		 	partnerId = L7_SDU[1];
-
 		 	receivedSDU = true; // relevant?
-		 	//ApNr = 42;
 
 		 	if(partnerId != 0){ // partnerId is not 0 -> await new package
 		 		await = true;
+		 		create = false;
 		 	} else { // partnerId is 0 -> create new package
 		 		create = true;
+		 		await = false;
 		 	}
 		 	L7_send(apNr, L7_SDU);
-		 	//for(int i = 0; i < L7_SDU_size; i++){ // copy L7_SDU to L7_SDU_send
-		 	//	L7_SDU_send[i] = L7_SDU[i];
-		 	//}
 	    case 43: // Forward Package
 	    	packageId = L7_SDU[0];
-	    	receivedSDU = true;
 	    	uint8_t fromId = L7_SDU[1];
 	    	uint8_t toId = L7_SDU[2];
+	    	receivedSDU = true;
 //	    	            if (toId == 0 || fromId == 0) { // Invalid neighbor IDs
 //	    	            	failure = true;
 //	    	                //zustand = Z_failure;
 //	    	                //errorId = 4; // Ungültige Nachbar-ID
 //	    	                break;
 //	    	            }
-
 	    	            await = true;
-	    	            passOn = true;// Warten auf Signal
-	    	            // Weiterleiten des Pakets (ohne Speichern)
+	    	            passOn = true;
+	    	            // Weiterleiten des Pakets
 	    	            L7_send(apNr, L7_SDU);
 	    	            break;
 
 	     case 44: // Pass on/ Deliver Package
 	    	 packageId = L7_SDU[0];
 	    	 partnerId = L7_SDU[1];
-
 	    	 receivedSDU = true;
-	    	 //ApNr = 44;
-
 	    	 if(partnerId != 0){ // partnerId is not 0 -> passOn package
 	    	 	    passOn = true;
+	    	 	    deliver = false;
 	    	 	} else { // partnerId is 0 -> deliver package
+	    	 		passOn = false;
 	    	 		deliver = true;
 	    	 	}
 	    	    L7_send(apNr, L7_SDU);
-
-	    	 	//for(int i = 0; i < L7_SDU_size; i++){ // copy L7_SDU to L7_SDU_send
-	    	 	//	L7_SDU_send[i] = L7_SDU[i];
-	    	 	//}
 	     case 50:
 	    	 poll = true;
-
 	    	 	L7_SDU[0] = zustand;
 	    	 	if(zustand == Z_failure){ // state is failure, send errorId instead of packageId
 	    	 		L7_SDU[1] = errorId;
 	    	 	} else {
 	    	 		L7_SDU[1] = packageId;
 	    	 	}
-	    	 	for(int i = 2; i < L7_SDU_size; i++){ // copy storage to L7_SDU_send, index 2 to 7 //TODO: adapt to storage size constant
+	    	 	for(int i = 2; i < L7_SDU_size; i++){ // copy storage to L7_SDU_send, index 2 to 7
 	    	 		L7_SDU[i] = storage[i-2];
 	    	 	}
 	    	 	L7_send(apNr, L7_SDU);
@@ -883,10 +842,6 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 	        	pushedButton = true;
 	            lastTime = currentTime;
 	        }
-		// Reset der L7_SDU
-		/*for (uint8_t i = 0; i < L7_SDU_size; i++) {
-		                L7_SDU[i] = 0;
-		            }*/
 	    }
 }
 /* USER CODE END 4 */
