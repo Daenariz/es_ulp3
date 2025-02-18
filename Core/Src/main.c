@@ -52,6 +52,14 @@ typedef union
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define debounceDelay 150
+
+//Elevator stuff
+#define MOTORGPIO GPIOC
+#define stay 0
+#define up 1
+#define down 2
+
 #define MMCP_MASTER_ADDRESS 0
 #define MMCP_VERSION 6
 #define L7_PDU_size 9
@@ -80,15 +88,14 @@ typedef union
 /* LED stuff */
 #define NEOPIXEL_ZERO 34
 #define NEOPIXEL_ONE 67
-#define NUM_PIXELS 8
-#define DMA_BUFF_SIZE (NUM_PIXELS * 24) + 1
 
 /*Neighbours*/
 #define NEIGHBOUR_ID_SOUTH 0
 #define NEIGHBOUR_ID_NORTH 0
-#define NEIGHBOUR_ID_EAST 54
-#define NEIGHBOUR_ID_WEST 56
+#define NEIGHBOUR_ID_EAST 0
+#define NEIGHBOUR_ID_WEST 55
 
+#define otherElevatorAddress 55
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -99,12 +106,12 @@ typedef union
 /* Private variables ---------------------------------------------------------*/
 TIM_HandleTypeDef htim2;
 DMA_HandleTypeDef hdma_tim2_ch3_up;
+DMA_HandleTypeDef hdma_tim2_ch2_ch4;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-
 const uint16_t neighbourSendPins[NUM_NEIGHBOURS] = {to_S_SV4_Pin, to_N_SV8_Pin, to_O_SV3_Pin, to_W_SV5_Pin};
 const uint8_t neighbourIDs[NUM_NEIGHBOURS] = {
 	NEIGHBOUR_ID_SOUTH,
@@ -123,6 +130,10 @@ uint8_t toId;
 uint8_t storage[6] = {0};
 uint8_t tempStorage[6] = {0};
 uint8_t ApNr;
+uint8_t direction;
+uint32_t myAddress = 63;
+uint8_t NUM_PIXELS = 8;
+uint8_t DMA_BUFF_SIZE = (8 * 24) + 1;
 
 // Kontrollfluesse
 bool receive = false;
@@ -137,9 +148,10 @@ bool failure = false;
 bool receivedSDU = false;
 bool GPIO_neighbour_in = false;
 bool pushedButton = false;
+bool positionReached = false;
 
 //LED Sachen
-uint32_t dmaBuffer[DMA_BUFF_SIZE] = {0};
+uint32_t dmaBuffer[193] = {0};
 uint32_t *pBuff;
 uint8_t LEDColors[17][3] = { {0, 0, 0}, {255, 255, 255},  {255, 0, 0},
 		 {0, 255, 0},  {0, 0, 255},  {0, 255, 255},
@@ -147,15 +159,16 @@ uint8_t LEDColors[17][3] = { {0, 0, 0}, {255, 255, 255},  {255, 0, 0},
 		 {191, 255, 0},  {128, 128, 0},  {255, 128, 0},
 		 {255, 191, 191},  {191, 0, 64},  {0, 128, 128},
 		 {128, 0, 128},  {224, 176, 255} };
-PixelRGB_t pixels[NUM_PIXELS] = {0};
+PixelRGB_t pixels[8] = {0};
 BOOL timer_irq = FALSE; // gets set HIGH every 100ms
+PixelRGB_t leds[4] = {0};
 
 // Zustandstyp + Zustandsvariable
-typedef enum {Z_idle, Z_processing, Z_failure, Z_deliver, Z_passOn, Z_sent, Z_awaiting, Z_received} zustand_t;
+typedef enum {Z_idle, Z_processing, Z_failure, Z_deliver, Z_passOn, Z_sent, Z_awaiting, Z_received, Z_elevate} zustand_t;
 zustand_t zustand;
 
 // Aktionentyp + Aktionsvariable
-typedef enum {A_idle, A_forwardPassOn, A_setup,A_updateLager, A_await, A_create, A_deliver, A_passOn, A_forwardAwait, A_forward, A_failure, A_pulse, A_handleStore, A_storeAwait, A_storeCreate, A_checkFailure, A_forwardAgain} aktion_t;
+typedef enum {A_idle, A_setup,A_updateLager, A_await, A_create, A_deliver, A_passOn, A_forwardAwait, A_failure, A_pulse, A_handleStore, A_storeAwait, A_storeCreate, A_checkFailure, A_forwardAgain, A_elevate} aktion_t;
 aktion_t aktion;
 
 /* USER CODE END PV */
@@ -167,8 +180,8 @@ static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_USART1_UART_Init(void);
-/* USER CODE BEGIN PFP */
 
+/* USER CODE BEGIN PFP */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart);
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart);
 void HAL_GPIO_EXTI_Callback ( uint16_t GPIO_Pin );
@@ -197,14 +210,20 @@ void stateFailure(void);
 void handleStore(void);
 void handleSend(void);
 void updateLager(void);
-void animateSend(void);
-void animateReceive(void);
+void animateSentStorage(void);
+void animateReceiveStorage(void);
 void animateCreate(void);
 void animateDeliver(void);
+void animateSentElevator(void);
+void animateReceiveElevator(void);
 void pulse(void);
 void handleForward(void);
 void resetData(void);
 void forwardReset(void);
+void resetAufzug(void);
+void Aufzugfahr(void);
+void resetPulse(void);
+void resetLEDs(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -212,6 +231,7 @@ void forwardReset(void);
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
   HAL_TIM_PWM_Stop_DMA(htim, TIM_CHANNEL_3);
+  HAL_TIM_PWM_Stop_DMA(htim, TIM_CHANNEL_2);
 }
 
 void stateProcessing(void) {
@@ -237,7 +257,9 @@ void stateFailure(void) {
 //void simulateButtonPress(void) {
 //    HAL_GPIO_EXTI_Callback(B1_Pin);
 //}
-
+void resetPulse(){
+	GPIO_neighbour_in = false;
+}
 //HIER DIE LED BEGINN
 void writeLEDs(PixelRGB_t* pixel){
 	int i,j;
@@ -259,19 +281,50 @@ void writeLEDs(PixelRGB_t* pixel){
 	   }
 	  }
 	  dmaBuffer[DMA_BUFF_SIZE - 1] = 0; // last element must be 0!
-
-	  HAL_TIM_PWM_Start_DMA(&htim2, TIM_CHANNEL_3, dmaBuffer, DMA_BUFF_SIZE);
+	  //decide which channel to use depends which leds should work
+	  if(NUM_PIXELS == 8){
+		  HAL_TIM_PWM_Start_DMA(&htim2, TIM_CHANNEL_3, dmaBuffer, DMA_BUFF_SIZE);
+	  }
+	  if(NUM_PIXELS == 4){
+		  HAL_TIM_PWM_Start_DMA(&htim2, TIM_CHANNEL_2, dmaBuffer, DMA_BUFF_SIZE);
+	  }
 }
-void animateSend(void){
+void resetLEDs(void){
+	NUM_PIXELS = 4;
+	DMA_BUFF_SIZE = (NUM_PIXELS * 24) + 1;
+	if(partnerId == NEIGHBOUR_ID_WEST || toId == NEIGHBOUR_ID_WEST){
+		leds[0].color.g = 0;
+		leds[0].color.r = 0;
+		leds[0].color.b = 0;
+	}
+	if(partnerId == NEIGHBOUR_ID_SOUTH || toId == NEIGHBOUR_ID_SOUTH){
+		leds[1].color.g = 0;
+		leds[1].color.r = 0;
+		leds[1].color.b = 0;
+	}
+	if(partnerId == NEIGHBOUR_ID_NORTH || toId == NEIGHBOUR_ID_NORTH){
+		leds[2].color.g = 0;
+		leds[2].color.r = 0;
+		leds[2].color.b = 0;
+	}
+	if(partnerId == NEIGHBOUR_ID_EAST || toId == NEIGHBOUR_ID_EAST){
+		leds[3].color.g = 0;
+		leds[3].color.r = 0;
+		leds[3].color.b = 0;
+	}
+	writeLEDs(leds);
+}
+void animateSentStorage(void){
 	uint8_t i = 0;
-
+	NUM_PIXELS = 8;
+	DMA_BUFF_SIZE = (NUM_PIXELS * 24) + 1;
 	// find index of Lager, were packageId was stored
 	for(i = 0; i < LAGER_SIZE; i++){
 		if(storage[i] == packageId){
 			break;
 		}
 	}
-
+	//STORAGE LEDS
 	// turn off corresponding LED
 	pixels[i+1].color.g = 0;
 	pixels[i+1].color.r = 0;
@@ -298,8 +351,9 @@ void animateSend(void){
 	}
 	writeLEDs(pixels);
 }
-void animateReceive(void){
-
+void animateReceiveStorage(void){
+	NUM_PIXELS = 8;
+	DMA_BUFF_SIZE = (NUM_PIXELS * 24) + 1;
 			pixels[0].color.g = (uint8_t)LEDColors[packageId][1]*0.1;
 			pixels[0].color.r = (uint8_t)LEDColors[packageId][0]*0.1;
 			pixels[0].color.b = (uint8_t)LEDColors[packageId][2]*0.1;
@@ -321,7 +375,8 @@ void animateReceive(void){
 }
 void animateCreate(void){
 	uint8_t i = 0;
-
+	NUM_PIXELS = 8;
+	DMA_BUFF_SIZE = (NUM_PIXELS * 24) + 1;
 	// find index of tempLager, were packageId is stored
 	for(i = 0; i < LAGER_SIZE; i++){
 		if(tempStorage[i] == packageId){
@@ -351,7 +406,8 @@ void animateCreate(void){
 }
 void animateDeliver(void){
 	uint8_t i = 0;
-
+	NUM_PIXELS = 8;
+	DMA_BUFF_SIZE = (NUM_PIXELS * 24) + 1;
 	// find index of Lager, were packageId was stored
 	for(i = 0; i < LAGER_SIZE; i++){
 		if(storage[i] == packageId){
@@ -380,13 +436,79 @@ void animateDeliver(void){
 	writeLEDs(pixels);
 }
 //HIER DIE LED ENDE
+//HIER AUFZUG BEGINN
+void animateSentElevator(void){
+	//Hier Aufzug fahren lassen
+	if(partnerId == otherElevatorAddress || toId == otherElevatorAddress || partnerId == myAddress || toId == myAddress){ //hier Id des Nachbarn mit dem anderen Aufzug
+		direction = up;
+		Aufzugfahr();
+	}
 
+	//äußere LEDs steuern
+	NUM_PIXELS = 4;
+	DMA_BUFF_SIZE = (NUM_PIXELS * 24) + 1;
+	if(partnerId == NEIGHBOUR_ID_NORTH || toId == NEIGHBOUR_ID_NORTH){
+		leds[0].color.g = (uint8_t)LEDColors[packageId][1]*0.1;
+		leds[0].color.r = (uint8_t)LEDColors[packageId][0]*0.1;
+		leds[0].color.b = (uint8_t)LEDColors[packageId][2]*0.1;
+	}
+	if(partnerId == NEIGHBOUR_ID_EAST || toId == NEIGHBOUR_ID_EAST){
+		leds[1].color.g = (uint8_t)LEDColors[packageId][1]*0.1;
+		leds[1].color.r = (uint8_t)LEDColors[packageId][0]*0.1;
+		leds[1].color.b = (uint8_t)LEDColors[packageId][2]*0.1;
+	}
+	if(partnerId == NEIGHBOUR_ID_SOUTH || toId == NEIGHBOUR_ID_SOUTH){
+		leds[2].color.g = (uint8_t)LEDColors[packageId][1]*0.1;
+		leds[2].color.r = (uint8_t)LEDColors[packageId][0]*0.1;
+		leds[2].color.b = (uint8_t)LEDColors[packageId][2]*0.1;
+	}
+	if(partnerId == NEIGHBOUR_ID_WEST || toId == NEIGHBOUR_ID_WEST){
+		leds[3].color.g = (uint8_t)LEDColors[packageId][1]*0.1;
+		leds[3].color.r = (uint8_t)LEDColors[packageId][0]*0.1;
+		leds[3].color.b = (uint8_t)LEDColors[packageId][2]*0.1;
+	}
+	writeLEDs(leds);
+}
+void animateReceiveElevator(void){
+	//Hier Aufzug fahren lassen
+	if(partnerId == otherElevatorAddress || toId == otherElevatorAddress || partnerId == myAddress || toId == myAddress){ //hier Id des Nachbarn mit dem anderen Aufzug
+		direction = up;
+		Aufzugfahr();
+	}
 
+	//hier selbstgeklebte LEDs
+	NUM_PIXELS = 4;
+	DMA_BUFF_SIZE = (NUM_PIXELS * 24) + 1;
+	if(partnerId == NEIGHBOUR_ID_NORTH || toId == NEIGHBOUR_ID_NORTH){
+		leds[0].color.g = (uint8_t)LEDColors[packageId][1]*0.1;
+		leds[0].color.r = (uint8_t)LEDColors[packageId][0]*0.1;
+		leds[0].color.b = (uint8_t)LEDColors[packageId][2]*0.1;
+	}
+	if(partnerId == NEIGHBOUR_ID_EAST || toId == NEIGHBOUR_ID_EAST){
+		leds[1].color.g = (uint8_t)LEDColors[packageId][1]*0.1;
+		leds[1].color.r = (uint8_t)LEDColors[packageId][0]*0.1;
+		leds[1].color.b = (uint8_t)LEDColors[packageId][2]*0.1;
+	}
+	if(partnerId == NEIGHBOUR_ID_SOUTH || toId == NEIGHBOUR_ID_SOUTH){
+		leds[2].color.g = (uint8_t)LEDColors[packageId][1]*0.1;
+		leds[2].color.r = (uint8_t)LEDColors[packageId][0]*0.1;
+		leds[2].color.b = (uint8_t)LEDColors[packageId][2]*0.1;
+	}
+	if(partnerId == NEIGHBOUR_ID_WEST || toId == NEIGHBOUR_ID_WEST){
+		leds[3].color.g = (uint8_t)LEDColors[packageId][1]*0.1;
+		leds[3].color.r = (uint8_t)LEDColors[packageId][0]*0.1;
+		leds[3].color.b = (uint8_t)LEDColors[packageId][2]*0.1;
+	}
+	writeLEDs(leds);
+}
 
-
-
-
-
+void resetAufzug(void){
+	if(positionReached){
+		direction = down;
+		Aufzugfahr();
+	}
+}
+//HIER AUFZUG ENDE
 
 void deployPackage(void) {
 		// copy storage to tempStorage
@@ -425,14 +547,12 @@ void handleSend(void){
 	finishedSend = TRUE;
 }
 
-
 void updateStorage(void) {
 		// copy tempStorage to storage
 		for(int i = 0; i < STORAGE_SIZE; i++){
 			storage[i] = tempStorage[i];
 		}
 }
-
 
 void sendPulse(void) {
 	uint8_t partnerNumber = 0;
@@ -445,10 +565,10 @@ void sendPulse(void) {
 		// toggle corresponding pin for 1ms; keine Unterscheidung für Ports A und B
 		HAL_GPIO_WritePin (GPIOA, neighbourSendPins[partnerNumber], GPIO_PIN_SET);
 		HAL_GPIO_WritePin (GPIOB, neighbourSendPins[partnerNumber], GPIO_PIN_SET);
-		HAL_Delay(1);
+		HAL_Delay(10);
 		HAL_GPIO_WritePin (GPIOA, neighbourSendPins[partnerNumber], GPIO_PIN_RESET);
 		HAL_GPIO_WritePin (GPIOB, neighbourSendPins[partnerNumber], GPIO_PIN_RESET);
-		HAL_Delay(1);
+		HAL_Delay(10);
 }
 
 void checkFailure(void){
@@ -534,13 +654,11 @@ void checkFailure(void){
 		errorId = 5;
 	}
 }
+
 uint8_t rxBuffer[L1_PDU_size];
 uint8_t L1_PDU[L1_PDU_size] = {0};
-uint32_t myAddress = 55;
 uint32_t cnt = 0;
-uint32_t lastTime = 0;
-const uint32_t debounceDelay = 150;
-bool uartDataReceived = false;
+uint32_t lastDebounceTime = 0;
 bool uartDataSendable = true;
 
 void std(void){
@@ -557,30 +675,27 @@ void std(void){
 		}
 		break;
 
-
 	case Z_processing:
-		if (create && (!failure)){
+		if (create && (!failure)){								//Erzeugen
 			aktion = A_create;
 			zustand = Z_awaiting;
 			poll = FALSE;
 		}
-		else if (await && !passOn && (!failure)){
-			aktion = A_await;
-			zustand = Z_awaiting;
-			poll = FALSE;
+		else if (await && !passOn && (!failure)){				//Erwarten
+			aktion = A_elevate;
+			zustand = Z_elevate;
 		}
-		else if (deliver && (!failure)){
+		else if (deliver && (!failure)){						//Abliefern
 			aktion = A_deliver;
 			zustand = Z_deliver;
 		}
-		else if (passOn && !await && pushedButton && (!failure)){ ///here
+		else if (passOn && !await && (!failure)){				//Versenden bzw. Forwarding nach Empfang
 			aktion = A_passOn;
 			zustand = Z_passOn;
 		}
-		else if ((await && passOn) && (!failure)){ ///hallo
-			aktion = A_await;
-			zustand = Z_awaiting;
-			poll = FALSE;
+		else if ((await && passOn) && (!failure)){				//Forwarding vor Empfang
+			aktion = A_elevate;
+			zustand = Z_elevate;
 		}
 		else if (failure){
 			aktion = A_failure;
@@ -598,7 +713,7 @@ void std(void){
 		}
 		break;
 
-	case Z_deliver:
+	case Z_deliver:					//abliefern an Master
 		if (poll && finishedSend){
 			aktion = A_updateLager;
 			zustand = Z_sent;
@@ -606,8 +721,8 @@ void std(void){
 		}
 		break;
 
-	case Z_passOn:
-		if (poll && finishedSend){
+	case Z_passOn:					//ausliefern an Nachbarn
+		if (poll && finishedSend && positionReached){
 			aktion = A_pulse;
 			zustand = Z_sent;
 			poll = FALSE;
@@ -615,7 +730,7 @@ void std(void){
 		break;
 
 
-	case Z_sent:
+	case Z_sent:					//Senden abgeschlossen mit Ankunft des , also alles zurücksetzen
 		if (poll){
 			aktion = A_setup;
 			zustand = Z_idle;
@@ -623,61 +738,54 @@ void std(void){
 		}
 		break;
 
-	case Z_awaiting: ///here
-//		if (GPIO_neighbour_in && await && !finishedStore){ ///here
-//			aktion = A_handleStore;
-//			GPIO_neighbour_in = FALSE;
-//		}
-		/*else if (GPIO_neighbour_in && forward){
-			aktion = A_forwardAwait;
-			zustand = Z_received;
-			GPIO_neighbour_in = FALSE;
-		}*/
-		/*else*/ if(pushedButton && (await && !passOn)){ ///here
+	case Z_awaiting:
+		if(GPIO_neighbour_in && (await && !passOn)){ 	//Erwarten
 			aktion = A_storeAwait;
 			zustand = Z_received;
 			poll = FALSE;
 		}
-		else if (poll && finishedStore && create){
+		else if (poll && finishedStore && create){		//Erzeugen
 			aktion = A_storeCreate;
 			zustand = Z_received;
 			poll = FALSE;
 		}
-		else if ((await && passOn) && pushedButton){ ///hallo
-			aktion = A_forwardAwait; ///here
+		else if ((await && passOn) && GPIO_neighbour_in){ //weiterleiten
+			aktion = A_forwardAwait;
 			zustand = Z_received;
 			poll = FALSE;
-			//GPIO_neighbour_in = FALSE; ///here
 		}
 		break;
 
 	case Z_received:
-		if(poll && (await && passOn)){ ///hallo
-			//await = FALSE; ///hallo
-			//pushedButton = FALSE; ///hallo
-			//pushedButton = FALSE;
+		if(poll && (await && passOn)){			//Forwarding
 			aktion = A_forwardAgain;
 			zustand = Z_processing;
 			poll = FALSE;
+			}
 
-				}
-		else if (poll && (!await || !passOn)/*&& (!forward)*/){ ///here
+		else if (poll && (!await || !passOn)){ 	//Erwarten und Erzeugen
 			aktion = A_setup;
 			zustand = Z_idle;
-			poll = FALSE; //*
-		}
-//		else if(poll && (await && passOn)){ ///hallo
-//			zustand = Z_processing;
-//		}
-		else if(!poll){
-			aktion = A_idle; //*
-		}
-		/*
-		else if(poll && forward){
-			aktion = A_forward;
-			zustand = Z_sent;
 			poll = FALSE;
-		}*/
+		}
+		else if(!poll){
+			aktion = A_idle;
+		}
+		break;
+
+	case Z_elevate:
+		if(fromId == otherElevatorAddress || partnerId == otherElevatorAddress){
+			if(positionReached == true){
+				aktion = A_await;
+				zustand = Z_awaiting;
+				positionReached = false;
+				poll = FALSE;
+			}
+		}else{
+			aktion = A_await;
+			zustand = Z_awaiting;
+			poll = FALSE;
+		}
 		break;
 	}
 }
@@ -685,8 +793,10 @@ void std(void){
 void pat(void){
 	switch(aktion){
 	case A_setup:
+		resetAufzug();
 		resetData();
 		stateProcessing();
+		resetLEDs();
 		break;
 	case A_deliver:
 		stateProcessing();
@@ -695,38 +805,33 @@ void pat(void){
 	case A_passOn:
 		stateProcessing();
 		handleSend();
+		animateSentElevator();
 		break;
-	case A_forwardPassOn: ///hallo
-		stateProcessing();
-			break;
 	case A_failure:
 		stateFailure();
 		break;
-
 	case A_pulse:
-		animateSend();
-		sendPulse(); ///here
 		updateStorage();
 		stateSent();
+		animateSentStorage();
+		sendPulse();
 		break;
 	case A_updateLager:
 		animateDeliver();
 		updateStorage();
-		stateSent();
+		//stateSent();
+		stateProcessing();
 		break;
 	case A_forwardAgain:
+		resetAufzug();
 		forwardReset();
 		stateProcessing();
-	/*case A_forward:
-		handleForward();
-		stateSent();
-		break;*/
 		break;
 	case A_forwardAwait:
 		stateReceived();
+		resetPulse();
 		break;
 	case A_await:
-		stateAwait();
 		break;
 	case A_create:
 		stateAwait();
@@ -736,10 +841,11 @@ void pat(void){
 		deployPackage();
 		break;
 	case A_storeAwait:
-		animateReceive();
-		deployPackage(); ///here
+		deployPackage();
 		updateStorage();
 		stateReceived();
+		resetPulse();
+		animateReceiveStorage();
 		break;
 	case A_storeCreate:
 		animateCreate();
@@ -750,10 +856,13 @@ void pat(void){
 		checkFailure();
 		stateProcessing();
 		break;
-
+	case A_elevate:
+		animateReceiveElevator();
+		break;
 	case A_idle:
 		break;
 	}
+	aktion = A_idle;
 }
 /* USER CODE END 0 */
 
@@ -791,19 +900,28 @@ int main(void)
   MX_TIM2_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_UART_Receive_IT(&huart1, rxBuffer, sizeof(rxBuffer));
+	HAL_UART_Receive_IT(&huart1, rxBuffer, sizeof(rxBuffer));
+	// Zustandsuebergangsdiagramm und Aufzüge reset
+  	direction = up;
+  	Aufzugfahr();
+  	HAL_Delay(500);
+  	direction = down;
+  	Aufzugfahr();
+  	direction = up;
 
-  // Zustandsuebergangsdiagramm reset
-    	zustand = Z_idle;
-    	aktion = A_idle;
-    	pat();
-    	//LEDs Zurücksetzen
-    	for(int i = 0; i < NUM_PIXELS; i++){
-    			pixels[i].color.g = 0;
-    			pixels[i].color.r = 0;
-    			pixels[i].color.b = 0;
-    		}
-    		writeLEDs(pixels);
+  	//alles in den Startzustand bringen
+  	zustand = Z_idle;
+    aktion = A_idle;
+    pat();
+    //LEDs Zurücksetzen
+    for(int i = 0; i < NUM_PIXELS; i++){
+    		pixels[i].color.g = 0;
+    		pixels[i].color.r = 0;
+    		pixels[i].color.b = 0;
+    }
+    NUM_PIXELS = 8;
+    DMA_BUFF_SIZE = (NUM_PIXELS * 24) + 1;
+    writeLEDs(pixels);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -815,8 +933,6 @@ int main(void)
     /* USER CODE BEGIN 3 */
 	  	  std();
 	  	  pat();
-
-
   }
   /* USER CODE END 3 */
 }
@@ -867,6 +983,11 @@ void SystemClock_Config(void)
   }
 }
 
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM2_Init(void)
 {
 
@@ -910,6 +1031,10 @@ static void MX_TIM2_Init(void)
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();
@@ -921,6 +1046,11 @@ static void MX_TIM2_Init(void)
 
 }
 
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_USART1_UART_Init(void)
 {
 
@@ -949,6 +1079,11 @@ static void MX_USART1_UART_Init(void)
 
 }
 
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_USART2_UART_Init(void)
 {
 
@@ -977,6 +1112,9 @@ static void MX_USART2_UART_Init(void)
 
 }
 
+/**
+  * Enable DMA controller clock
+  */
 static void MX_DMA_Init(void)
 {
 
@@ -987,9 +1125,17 @@ static void MX_DMA_Init(void)
   /* DMA1_Stream1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
+  /* DMA1_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
 
 }
 
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -1009,11 +1155,20 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, to_N_SV8_Pin|to_W_SV5_Pin, GPIO_PIN_RESET);
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, up_Pin|down_Pin|speed_Pin, GPIO_PIN_RESET);
+
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : button_down_Pin */
+  GPIO_InitStruct.Pin = button_down_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(button_down_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LD2_Pin to_S_SV4_Pin to_O_SV3_Pin */
   GPIO_InitStruct.Pin = LD2_Pin|to_S_SV4_Pin|to_O_SV3_Pin;
@@ -1029,6 +1184,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /*Configure GPIO pins : up_Pin down_Pin speed_Pin */
+  GPIO_InitStruct.Pin = up_Pin|down_Pin|speed_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
   /*Configure GPIO pins : from_N_LS1_Pin from_O_LS2_Pin from_S_LS3_Pin */
   GPIO_InitStruct.Pin = from_N_LS1_Pin|from_O_LS2_Pin|from_S_LS3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
@@ -1041,7 +1203,22 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(from_W_LS4_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : button_up_Pin */
+  GPIO_InitStruct.Pin = button_up_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(button_up_GPIO_Port, &GPIO_InitStruct);
+
   /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI2_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
@@ -1051,6 +1228,20 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+void Aufzugfahr(){
+	if(direction == up){// Fahrtrichtung aufwärts
+		HAL_GPIO_WritePin(GPIOC, down_Pin, 0);
+	    HAL_GPIO_WritePin(GPIOC, up_Pin, 1);
+		// Set the speed high
+		HAL_GPIO_WritePin(GPIOC, speed_Pin, 1);
+	}
+	if(direction == down){// Fahrtrichtung abwärts
+		HAL_GPIO_WritePin(GPIOC, up_Pin, 0);
+		HAL_GPIO_WritePin(GPIOC, down_Pin, 1);
+		// Set the speed high
+		HAL_GPIO_WritePin(GPIOC, speed_Pin, 1);
+	}
+}
 
 void resetData(){
 	packageId = 0;
@@ -1069,14 +1260,17 @@ void resetData(){
 	receivedSDU = false;
 	GPIO_neighbour_in = false;
 	pushedButton = false;
-	fromId = false; ///hallo
-	toId = false; ///hallo
+	fromId = -1; ///hallo
+	toId = -1; ///hallo
+	direction = down;	//damit aufzug im nächsten Schritt wieder runter in default fährt
+	positionReached = false; //
 }
 
-
 void forwardReset(void) {
-	await = FALSE; ///hallo
+	await = FALSE;
 	pushedButton = FALSE;
+	direction = down;
+	positionReached = false;
 }
 
 void L1_receive(uint8_t L1_PDU[L1_PDU_size]) {
@@ -1121,15 +1315,12 @@ void L3_receive(uint8_t L3_PDU[L3_PDU_size]){
         uint8_t L3_SDU[L3_SDU_size];
         memcpy(L3_SDU, &L3_PDU[4], L3_SDU_size);
         L7_receive(L3_SDU);
-    }else if (to != myAddress && to != 0 && from == 0) {
+    }else{// if (to != myAddress && to != 0 && from == 0) { //Mit if-Bed. funktioniert Master nicht
 	     hops++;
 	     L3_PDU[3] = hops;
 	     L2_send(L3_PDU);
 	}
 }
-
-
-
 
 void L7_receive(uint8_t L7_PDU[L7_PDU_size]){
  	uint8_t L7_SDU[L7_SDU_size] = {0};
@@ -1173,7 +1364,6 @@ void L7_receive(uint8_t L7_PDU[L7_PDU_size]){
  	uartDataSendable = true;  // ApNr invalid (unknown) -> discard packet
  	HAL_UART_Receive_IT(&huart1, rxBuffer, sizeof(rxBuffer)); // Attach interrupt to receive L1_PDU from USART
 }
-
 
 void L7_send(uint8_t Id, uint8_t L7_SDU[L7_SDU_size]){
 	uint8_t L7_PDU[L7_PDU_size];
@@ -1220,7 +1410,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 		 for(int i = 0; i < L1_PDU_size; i++){ // copy received packet from buffer
 		 			L1_PDU[i] = rxBuffer[i];
 		 		}
-	        uartDataReceived = true;
 	    }
 	 HAL_UART_Receive_IT(&huart1, rxBuffer, L1_PDU_size); // Attach interrupt to receive L1_PDU from USART
 	 L1_receive(L1_PDU);
@@ -1232,34 +1421,61 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
     }
 }
 
-
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 	if (GPIO_Pin == B1_Pin) {
 	        uint32_t currentTime = HAL_GetTick();
 
-	       if ((currentTime - lastTime) > debounceDelay) {
+	       if ((currentTime - lastDebounceTime) > debounceDelay) {
 	            cnt++;
 	        	pushedButton = true;
-	            lastTime = currentTime;
+	            lastDebounceTime = currentTime;
 	        }
 	}
 
-	if((GPIO_Pin == from_N_LS1_Pin) && (neighbourIDs[0] == partnerId)){
+	//Communication with Neighbours
+	if((GPIO_Pin == from_N_LS1_Pin) && (neighbourIDs[1] == partnerId)){
 	        GPIO_neighbour_in = TRUE;
-	  }
+	}
 
-	  if((GPIO_Pin == from_O_LS2_Pin) && (neighbourIDs[1] == partnerId)){
+	if((GPIO_Pin == from_O_LS2_Pin) && (neighbourIDs[2] == partnerId)){
 	        GPIO_neighbour_in = TRUE;
-	   }
+	}
 
-	 if((GPIO_Pin == from_S_LS3_Pin) && (neighbourIDs[2] == partnerId)){
-	       GPIO_neighbour_in = TRUE;
-	   }
+	if((GPIO_Pin == from_S_LS3_Pin) && (neighbourIDs[0] == partnerId)){
+			GPIO_neighbour_in = TRUE;
+	}
 
-	  if((GPIO_Pin == from_W_LS4_Pin) && (neighbourIDs[3] == partnerId)){
+	if((GPIO_Pin == from_W_LS4_Pin) && (neighbourIDs[3] == partnerId)){
 	        GPIO_neighbour_in = TRUE;
-	  }
+	}
 
+	//Elevator
+	if(GPIO_Pin == button_down_Pin){
+		uint32_t currentTime = HAL_GetTick();
+			if((currentTime - lastDebounceTime) > debounceDelay){
+
+				HAL_GPIO_TogglePin (GPIOA, GPIO_PIN_5); //toggle LED for control
+			    HAL_GPIO_WritePin(GPIOC, up_Pin, 0); //stop engine
+			    HAL_GPIO_WritePin(GPIOC, down_Pin, 0);
+
+			    direction = up; //change direction
+			    lastDebounceTime = currentTime;
+			}
+	}
+
+	if(GPIO_Pin == button_up_Pin){
+		uint32_t currentTime = HAL_GetTick();
+			if((currentTime - lastDebounceTime) > debounceDelay){
+
+				HAL_GPIO_TogglePin (GPIOA, GPIO_PIN_5); //toggle LED for control
+				HAL_GPIO_WritePin(GPIOC, up_Pin, 0); //stop motor
+				HAL_GPIO_WritePin(GPIOC, down_Pin, 0);
+
+				direction = down; //change direction
+				lastDebounceTime = currentTime;
+				positionReached = true;
+			}
+	}
 
 }
 
@@ -1283,7 +1499,6 @@ void ApNr_42(uint8_t L7_SDU[], uint8_t L7_SDU_send[]){
 		L7_SDU_send[i] = L7_SDU[i];
 	}
 }
-
 // ApNr 43
 // forward package
 // send back received L7_SDU
@@ -1305,7 +1520,6 @@ void ApNr_43(uint8_t L7_SDU[], uint8_t L7_SDU_send[]){
 		L7_SDU_send[i] = L7_SDU[i];
 	}
 }
-
 // ApNr 44
 // pass on / deliver package
 // send back received L7_SDU
@@ -1342,7 +1556,6 @@ void ApNr_50(uint8_t L7_SDU[], uint8_t L7_SDU_send[]){
 		L7_SDU_send[i] = storage[i-2];
 	}
 }
-
 
 /* USER CODE END 4 */
 
