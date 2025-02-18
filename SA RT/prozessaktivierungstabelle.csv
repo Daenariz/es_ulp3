@@ -1,0 +1,17 @@
+﻿Aktion/Prozess;animateCreate;animateDeliver;animateReceiveElevator;animateReceiveStorage;animateSentElevator;animateSentStorage;checkFailure;deployPackage;forwardReset;handleSend;resetAufzug;resetData;resetLEDs;resetPulse;sendPulse;stateAwait;stateFailure;stateProcessing;stateReceived;stateSent;updateStorage
+A_setup;;;;;;;;;;;1;2;4;;;;;3;;;
+A_deliver;;;;;;;;;;2;;;;;;;;1;;;
+A_passOn;;;;;3;;;;;2;;;;;;;;1;;;
+A_failure;;;;;;;;;;;;;;;;;1;;;;
+A_pulse;;;;;;3;;;;;;;;;4;;;;;2;1
+A_updateLager;;1;;;;;;;;;;;;;;;;3;;;2
+A_forwardAgain;;;;;;;;;2;;1;;;;;;;3;;;
+A_forwardAwait;;;;;;;;;;;;;;2;;;;;1;;
+A_await;;;;;;;;;;;;;;;;;;;;;
+A_create;;;;;;;;2;;;;;;;;1;;;;;
+A_handleStore;;;;;;;;1;;;;;;;;;;;;;
+A_storeAwait;;;;5;;;;1;;;;;;4;;;;;3;;2
+A_storeCreate;1;;;;;;;;;;;;;;;;;;3;;2
+A_checkFailure;;;;;;;1;;;;;;;;;;;2;;;
+A_elevate;;;2;;;;;;;;;;;;;1;;;;;
+A_idle;;;;;;;;;;;;;;;;;;;;;
